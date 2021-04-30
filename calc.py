@@ -52,8 +52,8 @@ def compute_total_raw(
         base_raw,
         atk_boost_lvl,
         petalace_atk,
-        has_talon_and_charm,
-        ls_spirit_level):
+        has_talon_and_charm=True,
+        ls_spirit_level=0):
     # spirit base raw boost occurs before all other buffs
     base_raw = base_raw * ls_spirit_raw[ls_spirit_level]
     raw = (base_raw +
@@ -93,7 +93,10 @@ def compute_effective_raw(
         crit_boost_lvl,
         crit_chance,
         sharpness_lvl=2):
-    crit_modifier = 1 + crit_chance * crit_boost_skill[crit_boost_lvl]
+    if crit_chance >= 0:
+        crit_modifier = 1 + crit_chance * crit_boost_skill[crit_boost_lvl]
+    else:
+        crit_modifier = 1 + crit_chance * 0.75
     sharpness_modifier = sharpness_raw[sharpness_lvl]
     return total_raw * crit_modifier * sharpness_modifier
 
@@ -126,8 +129,10 @@ ls_spirit_element = [1.00, 1.05, 1.10, 1.20]
 
 def compute_total_element(
         base_element,
-        element_atk_lvl,
-        ls_spirit_level):
+        element_atk_lvl=5,
+        ls_spirit_level=0):
+    if base_element == 0:
+        return 0
     # base element modifiers
     base_element = base_element * ls_spirit_element[ls_spirit_level]
     # elemental attack boost
@@ -139,6 +144,7 @@ def compute_effective_element(
         crit_element_lvl,
         crit_chance,
         sharpness_lvl=3):
+    crit_chance = 0 if crit_chance < 0 else crit_chance
     crit_modifier = 1 + crit_chance * crit_element_skill[crit_element_lvl]
     sharpness_modifier = sharpness_element[sharpness_lvl]
     return total_element * crit_modifier * sharpness_modifier
@@ -162,3 +168,151 @@ def compute_total_damage(
         HZV, EZV,
         MV, EM):
     return EfR * HZV * MV + EfE * EZV * EM
+
+###############################################################################
+# EFFECTIVE DAMAGE CALCULATION
+###############################################################################
+
+razor_sharp_skill = [0, 0.10, 0.25, 0.50]
+masters_touch_skill = [0, 0.20, 0.40, 0.80]
+
+def estimate_damage(
+        monster_hp,
+        EfR, EfE,
+        avg_mv, avg_em,
+        avg_hzv, avg_ezv,
+        sharpness_dist,
+        base_sharpness,
+        handicraft_lvl,
+        razor_sharp_lvl,
+        masters_touch_lvl,
+        crit_chance,
+        hits_to_sharpen):
+    base_hit_sharp = []
+    # handicraft provides 10 hits per level
+    base_sharpness += handicraft_lvl * 10
+    # fill in the sharpness bar based on the base sharpness
+    for i in range(0, 6):
+        nhits = sharpness_dist[i]
+        if nhits > base_sharpness:
+            base_hit_sharp.append((base_sharpness, i))
+            base_sharpness = 0
+        else:
+            base_hit_sharp.append((nhits, i))
+            base_sharpness -= nhits
+    # widen the bar based on the razor sharp and master's touch level
+    crit_chance = 0 if crit_chance < 0 else crit_chance
+    razor_mul = 1 / (1 - razor_sharp_skill[razor_sharp_lvl])
+    master_mul = 1 / (1 - masters_touch_skill[masters_touch_lvl] * crit_chance)
+    hit_sharp = []
+    for bar in base_hit_sharp:
+        new_hits = bar[0] * razor_mul * master_mul
+        if new_hits > 0:
+            hit_sharp.append((new_hits, bar[1]))
+    # append the first N hits before sharpen
+    if hits_to_sharpen > 0:
+        extra = []
+        for bar in reversed(hit_sharp):
+            if hits_to_sharpen <= bar[0]:
+                extra.append((hits_to_sharpen, bar[1]))
+                break
+            else:
+                extra.append((bar[0], bar[1]))
+                hits_to_sharpen -= bar[0]
+        hit_sharp += reversed(extra)
+    # do the simulation (TODO make faster with bulk)
+    hit_order = list(reversed(hit_sharp))
+    hit_idx = 0
+    tEfR = 0
+    tEfE = 0
+    nhits = 0
+    while monster_hp > 0:
+        if hit_order[hit_idx][0] <= 0:
+            hit_idx += 1
+        bar = hit_order[hit_idx]
+        sraw = sharpness_raw[bar[1]]
+        sele = sharpness_element[bar[1]]
+        # weighted average
+        tEfR += EfR * sraw
+        tEfE += EfE * sele
+        nhits += 1
+        # subtract HP
+        monster_hp -= compute_total_damage(
+                EfR * sraw, EfE * sele,
+                avg_hzv, avg_ezv,
+                avg_mv, avg_em)
+        # reduce sharpness
+        hit_order[hit_idx] = (bar[0] - 1, bar[1])
+
+    return tEfR / nhits, tEfE / nhits
+
+###############################################################################
+# CRIT CALCULATION
+###############################################################################
+
+crit_eye_skill = [0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
+max_might_skill = [0, 0.10, 0.20, 0.30]
+wex_skill = [0, 0.15, 0.30, 0.50]
+latent_power_skill = [0, 0.10, 0.20, 0.30, 0.40, 0.50]
+
+def compute_crit_chance(
+        base_crit,
+        crit_eye_lvl,
+        max_might_lvl,
+        wex_lvl,
+        latent_power_lvl=0,
+        latent_power_uptime=0.5,
+        rousing_roar=False,
+        rousing_roar_uptime=0.33,
+        max_might_uptime=1.0,
+        wex_uptime=1.0):
+    crit = base_crit
+    crit += crit_eye_skill[crit_eye_lvl]
+    crit += max_might_skill[max_might_lvl] * max_might_uptime
+    crit += wex_skill[wex_lvl] * wex_uptime
+    crit += latent_power_skill[latent_power_lvl] * latent_power_uptime
+    crit += (0.30 if rousing_roar else 0) * rousing_roar_uptime
+    crit = 1 if crit > 1 else crit
+    return crit
+
+# Assume attack buffs: Might Seed +10, Demon Powder +10, Mega Demondrug +7,
+#                      Booster +9
+# For most speedruns, might seed and demon powder have close to 100% uptime.
+
+def evaluate_build(build, params, atk_buff=36):
+    tR = compute_total_raw(
+            build.weapon.raw,
+            build.attack_boost,
+            atk_buff)
+    tE = compute_total_element(build.weapon.ele)
+    crit = compute_crit_chance(
+            build.weapon.crit,
+            build.crit_eye,
+            build.max_might,
+            build.wex)
+    EfR = compute_effective_raw(
+            tR,
+            build.crit_boost,
+            crit)
+    EfE = compute_effective_element(
+            tE,
+            build.crit_element,
+            crit)
+    SB = build.weapon.silkbind_boost
+    mMV = params.SBmMV if SB else params.mMV
+    mEM = params.SBmEM if SB else params.mEM
+    eEfR, eEfE = estimate_damage(
+            13500,
+            EfR, EfE,
+            mMV, mEM,
+            params.mHZV, params.mEZV,
+            build.weapon.dist,
+            build.weapon.base,
+            build.handicraft,
+            build.razor_sharp,
+            build.masters_touch,
+            crit,
+            params.hits_to_sharpen)
+    eDmg = eEfR * params.mHZV * mMV + eEfE * params.mEZV * mEM
+    return eEfR, eEfE, eDmg
+
